@@ -1,0 +1,193 @@
+// Load the geographic boundary
+var geometry = ee.FeatureCollection("users/rashidna/Puget_Sound");
+
+// Load the ERA5 Heat Index dataset
+var era5_heat_ic = ee.ImageCollection('projects/climate-engine-pro/assets/ce-era5-heat')
+                    .filterDate('2022-06-01', '2022-08-31') // Filter by date
+                    .filterBounds(geometry); // Filter to Puget Sound region
+
+print('ERA5 Heat Index Collection:', era5_heat_ic);
+
+// Function to convert Kelvin to Celsius
+function kelvinToCelsius(image) {
+  return image.subtract(273.15);
+}
+
+// Calculate the maximum temperature (utci_mean) over the time period
+var utci_mean = kelvinToCelsius(era5_heat_ic.select('utci_mean').max().clip(geometry));
+
+// Identify days where utci_max exceeds utci_mean
+var daysAboveMean = era5_heat_ic.map(function(image) {
+  var utciMaxCelsius = kelvinToCelsius(image.select('utci_max')); // Convert utci_max to Celsius
+  var isAboveMean = utciMaxCelsius.gt(utci_mean); // Identify where utci_max > utci_mean
+  return isAboveMean.rename('days_above_mean').clip(geometry); // Return binary image (1 if above mean, 0 otherwise)
+}).sum(); // Sum across the collection to count days above mean for each pixel
+
+// Count the number of images (days) where high temperature exceeds mean
+var imagesAboveMean = era5_heat_ic.map(function(image) {
+  var utciMaxCelsius = kelvinToCelsius(image.select('utci_max')); // Convert utci_max to Celsius
+  var isAboveMean = utciMaxCelsius.reduceRegion({
+    reducer: ee.Reducer.max(), // Using max instead of mean
+    geometry: geometry,
+    scale:27750
+  }).get('utci_max');
+  return image.set('isAboveMean', isAboveMean);
+}).filter(ee.Filter.gt('isAboveMean', 0)).size();
+
+// Calculate the maximum and minimum temperatures for utci_max
+var utciMaxMax = kelvinToCelsius(era5_heat_ic.select('utci_max').max().clip(geometry));
+var utciMaxMin = kelvinToCelsius(era5_heat_ic.select('utci_max').min().clip(geometry));
+
+// Define visualization parameters
+var tempVis = {
+  min: -10, // Celsius
+  max: 50,  // Celsius
+  palette: [
+    "#b2182b", "#ef8a62", "#fddbc7", "#f7f7f7", 
+    "#d1e5f0", "#67a9cf", "#2166ac"
+  ].reverse()
+};
+
+var daysAboveMeanVis = {
+  min: 0,
+  max: 90, // Adjust based on the time period (max possible days = 90)
+  palette: ['white', 'yellow', 'orange', 'red']
+};
+
+// Add layers to the map for Universal Thermal Climate Index
+Map.addLayer(utciMaxMax, tempVis, 'Maximum UTCI Max (°C)');
+Map.addLayer(utciMaxMin, tempVis, 'Minimum UTCI Max (°C)');
+Map.addLayer(kelvinToCelsius(era5_heat_ic.select('utci_mean').max().clip(geometry)), tempVis, 'Universal Thermal Climate Index (Max of Mean, °C)');
+
+
+// Center the map on the Puget Sound region
+Map.centerObject(geometry, 8);
+
+// Calculate the total number of days above mean for the entire region
+var totalDaysAboveMean = daysAboveMean.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: geometry,
+  scale: 27750
+}).get('days_above_mean');
+
+// Print results
+print('Total Days Above Mean Temperature:', totalDaysAboveMean);
+print('Number of Images (Days) with UTCI Max above Mean:', imagesAboveMean);
+
+// Print max and min temperature values for utci_max
+var maxTempValue = utciMaxMax.reduceRegion({
+  reducer: ee.Reducer.max(),
+  geometry: geometry,
+  scale: 27750
+}).get('utci_max');
+
+var minTempValue = utciMaxMin.reduceRegion({
+  reducer: ee.Reducer.min(),
+  geometry: geometry,
+  scale: 27750
+}).get('utci_max');
+
+print('Maximum UTCI Max Temperature (°C):', maxTempValue);
+print('Minimum UTCI Max Temperature (°C):', minTempValue);
+
+
+// .................................... Chart for UTCI Max and Min .....................................
+// Prepare the dataset for charting: Map over the ImageCollection to extract utci_max and utci_min values
+var dailyTemps = era5_heat_ic.map(function(image) {
+  var utciMax = kelvinToCelsius(image.select('utci_max')).reduceRegion({
+    reducer: ee.Reducer.max(), // Using max reducer for charting
+    geometry: geometry,
+    scale: 27750
+  }).get('utci_max');
+  
+  var utciMin = kelvinToCelsius(image.select('utci_min')).reduceRegion({
+    reducer: ee.Reducer.min(), // Using min reducer for charting
+    geometry: geometry,
+    scale: 27750
+  }).get('utci_min');
+  
+  return ee.Feature(null, {
+    'date': image.date().format('YYYY-MM-dd'),
+    'utci_max': utciMax,
+    'utci_min': utciMin
+  });
+});
+
+// Convert the ImageCollection to a FeatureCollection for charting
+var dailyTempsFC = ee.FeatureCollection(dailyTemps);
+
+// Generate a chart for the 91 days of temperature data for utci_max and utci_min
+var chart = ui.Chart.feature.byFeature({
+  features: dailyTempsFC,
+  xProperty: 'date',
+  yProperties: ['utci_max', 'utci_min']
+})
+.setChartType('LineChart')
+.setOptions({
+  title: 'Daily Maximum and Minimum UTCI (°C)',
+  hAxis: { title: 'Date', format: 'YYYY-MM-dd', gridlines: { count: 10 } },
+  vAxis: { title: 'Temperature (°C)' },
+  series: {
+    0: { label: 'UTCI Max (°C)', lineWidth: 2, pointSize: 4, color: 'red' },
+    1: { label: 'UTCI Min (°C)', lineWidth: 2, pointSize: 4, color: 'blue' }
+  }
+});
+
+// Print the chart in the console
+print(chart);
+
+// Print the FeatureCollection for debugging
+print('Daily Maximum and Minimum UTCI Temperature Data:', dailyTempsFC);
+
+
+// .................................. Days Above UTCI Max Mean ..................................
+// Calculate the mean of the utci_max band over the entire time period
+var utciMaxMean = era5_heat_ic.select('utci_max').mean(); // Calculate the mean in Kelvin
+var utciMaxMeanCelsius = kelvinToCelsius(utciMaxMean).clip(geometry); // Convert to Celsius and clip to the region
+print('Mean UTCI Max Temperature (°C):', utciMaxMeanCelsius);
+
+// Identify days (images) where utci_max exceeds the mean of utci_max
+var daysUtciMaxAboveMean = era5_heat_ic.map(function(image) {
+  var isAboveMean = image.select('utci_max').gt(utciMaxMean); // Compare each image to the mean
+  return image.set('isAboveMean', isAboveMean.reduceRegion({
+    reducer: ee.Reducer.anyNonZero(),
+    geometry: geometry,
+    scale: 27750
+  }).get('utci_max'));
+}).filter(ee.Filter.eq('isAboveMean', 1)); // Keep only images where utci_max > mean
+
+// Count the number of days (images) above the mean
+var countUtciDaysAboveMean = daysUtciMaxAboveMean.size();
+
+// Print the results
+print('Mean UTCI Max Temperature (°C):', utciMaxMeanCelsius);
+print('Number of Days (Images) where UTCI Max > Mean of UTCI Max:', countUtciDaysAboveMean);
+
+
+
+///////Exporting////////
+
+// Function to export a layer to Google Drive
+function exportLayer(image, description, fileNamePrefix, region, scale, folder) {
+  Export.image.toDrive({
+    image: image,
+    description: description,
+    folder: folder,
+    fileNamePrefix: fileNamePrefix,
+    region: region,
+    scale: scale,
+    crs: 'EPSG:4326'
+  });
+}
+
+// Export Layers
+var folderName = 'Era5_geeaws'; // Set your folder name in Google Drive
+var scale = 27750; // Set the scale for export
+
+// Export Maximum UTCI Max
+exportLayer(utciMaxMax, 'Max_UTCI_Max_2022', 'Max_UTCI_Max_2022', geometry, scale, folderName);
+
+// Export Minimum UTCI Max
+exportLayer(utciMaxMin, 'Min_UTCI_Max_2022', 'Min_UTCI_Max_2022', geometry, scale, folderName);
+
+
