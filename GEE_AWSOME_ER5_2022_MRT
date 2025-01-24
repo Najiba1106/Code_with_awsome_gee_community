@@ -1,0 +1,169 @@
+// Load the geographic boundary
+var geometry = ee.FeatureCollection("users/rashidna/Puget_Sound");
+
+// Load the ERA5 Heat Index dataset
+var era5_heat_ic = ee.ImageCollection('projects/climate-engine-pro/assets/ce-era5-heat')
+                    .filterDate('2022-06-01', '2022-08-31') // Filter by date
+                    .filterBounds(geometry); // Filter to Puget Sound region
+
+print('ERA5 Heat Index Collection:', era5_heat_ic);
+
+// Function to convert Kelvin to Celsius
+function kelvinToCelsius(image) {
+  return image.subtract(273.15);
+}
+
+// Calculate the mean temperature (mrt_mean) over the time period
+var mrt_mean = kelvinToCelsius(era5_heat_ic.select('mrt_mean').mean().clip(geometry));
+
+// Identify days where mrt_max exceeds mrt_mean
+var daysAboveMean = era5_heat_ic.map(function(image) {
+  var mrtMaxCelsius = kelvinToCelsius(image.select('mrt_max')); // Convert mrt_max to Celsius
+  var isAboveMean = mrtMaxCelsius.gt(mrt_mean); // Identify where mrt_max > mrt_mean
+  return isAboveMean.rename('days_above_mean').clip(geometry); // Return binary image (1 if above mean, 0 otherwise)
+}).sum(); // Sum across the collection to count days above mean for each pixel
+
+// Count the number of images (days) where high temperature exceeds mean
+var imagesAboveMean = era5_heat_ic.map(function(image) {
+  var mrtMaxCelsius = kelvinToCelsius(image.select('mrt_max')); // Convert mrt_max to Celsius
+  var isAboveMean = mrtMaxCelsius.reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: geometry,
+    scale: 1000
+  }).get('mrt_max');
+  return image.set('isAboveMean', isAboveMean);
+}).filter(ee.Filter.gt('isAboveMean', 0)).size();
+
+// Calculate the maximum and minimum temperatures for mrt_max
+var mrtMaxMax = kelvinToCelsius(era5_heat_ic.select('mrt_max').max().clip(geometry));
+var mrtMaxMin = kelvinToCelsius(era5_heat_ic.select('mrt_max').min().clip(geometry));
+
+// Define visualization parameters
+var tempVis = {
+  min: -10, // Celsius
+  max: 50,  // Celsius
+  palette: [
+    "#b2182b", "#ef8a62", "#fddbc7", "#f7f7f7", 
+    "#d1e5f0", "#67a9cf", "#2166ac"
+  ].reverse()
+};
+
+var daysAboveMeanVis = {
+  min: 0,
+  max: 90, // Adjust based on the time period (max possible days = 90)
+  palette: ['white', 'yellow', 'orange', 'red']
+};
+
+// Add layers to the map for Mean Radiant Temperature
+Map.addLayer(mrtMaxMax, tempVis, 'Maximum MRT Max (°C)');
+Map.addLayer(mrtMaxMin, tempVis, 'Minimum MRT Max (°C)');
+Map.addLayer(kelvinToCelsius(era5_heat_ic.select('mrt_mean').mean().clip(geometry)), tempVis, 'Mean Radiant Temperature (Mean, °C)');
+
+// Add the number of days above mean layer to the map
+Map.addLayer(daysAboveMean, daysAboveMeanVis, 'Days with MRT Max above Mean');
+
+// Center the map on the Puget Sound region
+Map.centerObject(geometry, 8);
+
+// Calculate the total number of days above mean for the entire region
+var totalDaysAboveMean = daysAboveMean.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: geometry,
+  scale: 1000
+}).get('days_above_mean');
+
+// Print results
+print('Total Days Above Mean Temperature:', totalDaysAboveMean);
+print('Number of Images (Days) with MRT Max above Mean:', imagesAboveMean);
+
+// Print max and min temperature values for mrt_max
+var maxTempValue = mrtMaxMax.reduceRegion({
+  reducer: ee.Reducer.max(),
+  geometry: geometry,
+  scale: 1000
+}).get('mrt_max');
+
+var minTempValue = mrtMaxMin.reduceRegion({
+  reducer: ee.Reducer.min(),
+  geometry: geometry,
+  scale: 1000
+}).get('mrt_max');
+
+print('Maximum MRT Max Temperature (°C):', maxTempValue);
+print('Minimum MRT Max Temperature (°C):', minTempValue);
+
+
+
+
+///////////Develop a chart//////////////////
+// Prepare the dataset for charting: Map over the ImageCollection to extract mrt_max and mrt_min values
+var dailyTemps = era5_heat_ic.map(function(image) {
+  var mrtMax = kelvinToCelsius(image.select('mrt_max')).reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: geometry,
+    scale: 1000
+  }).get('mrt_max');
+  
+  var mrtMin = kelvinToCelsius(image.select('mrt_min')).reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: geometry,
+    scale: 1000
+  }).get('mrt_min');
+  
+  return ee.Feature(null, {
+    'date': image.date().format('YYYY-MM-dd'),
+    'mrt_max': mrtMax,
+    'mrt_min': mrtMin
+  });
+});
+
+// Convert the ImageCollection to a FeatureCollection for charting
+var dailyTempsFC = ee.FeatureCollection(dailyTemps);
+
+// Generate a chart for the 91 days of temperature data for mrt_max and mrt_min
+var chart = ui.Chart.feature.byFeature({
+  features: dailyTempsFC,
+  xProperty: 'date',
+  yProperties: ['mrt_max', 'mrt_min']
+})
+.setChartType('LineChart')
+.setOptions({
+  title: 'Daily Temperatures for MRT Max and MRT Min (°C)',
+  hAxis: { title: 'Date', format: 'YYYY-MM-dd', gridlines: { count: 10 } },
+  vAxis: { title: 'Temperature (°C)' },
+  series: {
+    0: { label: 'MRT Max (°C)', lineWidth: 2, pointSize: 4, color: 'red' },
+    1: { label: 'MRT Min (°C)', lineWidth: 2, pointSize: 4, color: 'blue' }
+  }
+});
+
+// Print the chart in the console
+print(chart);
+
+// Print the FeatureCollection for debugging
+print('Daily MRT Max and Min Temperature Data:', dailyTempsFC);
+
+
+////////.......................................Days are above the mrt_max.....................//////////////
+
+// Calculate the mean of the mrt_max band over the entire time period
+var mrtMaxMean = era5_heat_ic.select('mrt_max').mean(); // Calculate the mean in Kelvin
+var mrtMaxMeanCelsius = kelvinToCelsius(mrtMaxMean).clip(geometry); // Convert to Celsius and clip to the region
+print('Mean MRT Max Temperature (°C):', mrtMaxMeanCelsius);
+
+// Identify days (images) where mrt_max exceeds the mean of mrt_max
+var daysMrtMaxAboveMean = era5_heat_ic.map(function(image) {
+  var isAboveMean = image.select('mrt_max').gt(mrtMaxMean); // Compare each image to the mean
+  return image.set('isAboveMean', isAboveMean.reduceRegion({
+    reducer: ee.Reducer.anyNonZero(),
+    geometry: geometry,
+    scale: 1000
+  }).get('mrt_max'));
+}).filter(ee.Filter.eq('isAboveMean', 1)); // Keep only images where mrt_max > mean
+
+// Count the number of days (images) above the mean
+var countDaysAboveMean = daysMrtMaxAboveMean.size();
+
+// Print the results
+print('Mean MRT Max Temperature (°C):', mrtMaxMeanCelsius);
+print('Number of Days (Images) where MRT Max > Mean of MRT Max:', countDaysAboveMean);
